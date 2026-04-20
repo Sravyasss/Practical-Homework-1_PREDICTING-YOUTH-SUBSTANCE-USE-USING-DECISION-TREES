@@ -1,1 +1,1 @@
-The video presentation Link: https://redhawks-my.sharepoint.com/:v:/g/personal/smurala_seattleu_edu/IQBl3UQDoyyiT74yv1icfEqbAQ6KjO_hQibUfnuYFp7BVfY
+https://redhawks-my.sharepoint.com/:v:/g/personal/smurala_seattleu_edu/IQBl3UQDoyyiT74yv1icfEqbAYLcKmVVJayX-thl0SbalP8?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=Ao1O78
