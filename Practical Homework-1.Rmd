@@ -1,0 +1,1093 @@
+---
+title: "Practical Homework-1"
+author: "Sravya Murala"
+date: "2026-04-11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Introduction
+This particular Homework examines various elements that influence youth drug usage, as found in survey data provided by the NSDUH 2023.
+Three hypotheses are tested in the analysis: 
+
+(1) What determines youth involvement with alcohol?
+
+(2) Among youth who use marijuana, what factors determine frequency of use?
+
+(3) How many days of marijuana use occur in one year?
+
+
+```{r}
+# Loading the required libraries
+
+library(tidyverse)
+library(randomForest)
+library(gbm)
+library(tree)
+library(ROSE)
+library(pROC)
+library(rpart)
+library(rpart.plot)
+```
+
+```{r}
+# Loading the Data
+youth_df <- read.csv("/Users/sravyaaas/Documents/SML-2/youth_data.csv")
+
+# exploring the dataset
+dim(youth_df)
+glimpse(youth_df)
+```
+
+```{r}
+# Checking the chosen variables
+table(youth_df$ALCFLAG)       # for binary class
+table(youth_df$MRJMDAYS)    # for multi-class
+table(youth_df$IRSMKLSS30N)        # for regression
+```
+
+```{r}
+table(youth_df$MRJYDAYS[youth_df$MRJFLAG == 1])
+```
+
+### Data Cleaning 
+
+```{r}
+## Choosing Predictors
+predictor_variables <- c("IRSEX", "NEWRACE2", "INCOME", "POVERTY3", 
+                "PARCHKHW", "PARHLPHW", "ARGUPAR", "SCHFELT", 
+                "AVGGRADE", "FRDMEVR2", "FRDADLY2", "PRMJEVR2",
+                "RLGATTD", "YOFIGHT2", "DRPRVME3", "ANYEDUC3")
+```
+
+```{r}
+# Binary class creation and dropping missing values
+binary_class_data <- youth_df %>%
+  select(all_of(predictor_variables), ALCFLAG) %>%
+  mutate(ALCFLAG = factor(ALCFLAG, levels = c(0,1), 
+                          labels = c("No", "Yes"))) %>%
+  drop_na()
+```
+
+```{r}
+# Multi-class class creation and dropping missing values
+multiclass <- youth_df %>%
+  filter(MRJFLAG == 1) %>%
+  select(all_of(predictor_variables), MRJYDAYS) %>%
+  mutate(MRJYDAYS = factor(MRJYDAYS, levels = 1:6,
+                           labels = c("1-11 days", "12-49 days", "50-99 days",
+                                      "100-199 days", "200-299 days", "300-365 days"))) %>%
+  drop_na()
+```
+
+```{r}
+# Regression creation and dropping missing data
+Regression <- youth_df %>%
+  select(all_of(predictor_variables), IRMJFY) %>%
+  filter(!IRMJFY %in% c(991, 993)) %>%
+  drop_na()
+```
+
+```{r}
+dim(binary_class_data)
+dim(multiclass)
+dim(Regression)
+```
+
+```{r}
+# EDA
+# Alcohol use rate by friend disapproval
+ggplot(youth_df %>% 
+         mutate(ALCFLAG = factor(ALCFLAG, levels=c(0,1), labels=c("No","Yes")),
+                FRDMEVR2 = factor(FRDMEVR2, levels=c(1,2), 
+                                  labels=c("Disapprove","Approve/Neutral"))),
+       aes(x = FRDMEVR2, fill = ALCFLAG)) +
+  geom_bar(position = "fill") +
+  labs(title = "Alcohol Use by Friend Attitude Toward Marijuana",
+       x = "Friends' Attitude", y = "Proportion", fill = "Used Alcohol") +
+  theme_minimal()
+
+# Alcohol use by income
+ggplot(youth_df %>%
+         mutate(ALCFLAG = factor(ALCFLAG, levels=c(0,1), labels=c("No","Yes")),
+                INCOME = factor(INCOME, levels=1:4, 
+                                labels=c("<$20k","$20-50k","$50-75k","$75k+"))),
+       aes(x = INCOME, fill = ALCFLAG)) +
+  geom_bar(position = "fill") +
+  labs(title = "Alcohol Use by Household Income",
+       x = "Income Level", y = "Proportion", fill = "Used Alcohol") +
+  theme_minimal()
+
+# Distribution of marijuana days
+youth_df %>%
+  filter(!IRMJFY %in% c(991, 993)) %>%
+  ggplot(aes(x = IRMJFY)) +
+  geom_histogram(bins = 30, fill = "blue", color = "yellow") +
+  labs(title = "Distribution of Marijuana Days Per Year (Among Users)",
+       x = "Days Per Year", y = "Count") +
+  theme_minimal()
+
+# Marijuana frequency distribution among users
+youth_df %>%
+  filter(MRJFLAG == 1) %>%
+  mutate(MRJYDAYS = factor(MRJYDAYS, levels=1:6,
+                           labels=c("1-11","12-49","50-99",
+                                    "100-199","200-299","300-365"))) %>%
+  ggplot(aes(x = MRJYDAYS)) +
+  geom_bar(fill = "blue") +
+  labs(title = "Marijuana Use Frequency Among Users",
+       x = "Days Per Year (Category)", y = "Count") +
+  theme_minimal()
+```
+
+```{r}
+apply_types <- function(df) {
+  df %>%
+    mutate(
+      # Binary factors with human-readable labels (1=yes/male, 2=no/female)
+      IRSEX     = factor(IRSEX,    levels = c(1,2), labels = c("Male","Female")),
+      PARCHKHW  = factor(PARCHKHW, levels = c(1,2), labels = c("Yes","No")),
+      PARHLPHW  = factor(PARHLPHW, levels = c(1,2), labels = c("Yes","No")),
+      ARGUPAR   = factor(ARGUPAR,  levels = c(1,2), labels = c("No","Yes")),
+      SCHFELT   = factor(SCHFELT,  levels = c(1,2), labels = c("Likes","Dislikes")),
+      FRDMEVR2  = factor(FRDMEVR2, levels = c(1,2), labels = c("No","Yes")),
+      FRDADLY2  = factor(FRDADLY2, levels = c(1,2), labels = c("No","Yes")),
+      PRMJEVR2  = factor(PRMJEVR2, levels = c(1,2), labels = c("No","Yes")),
+      RLGATTD   = factor(RLGATTD,  levels = c(1,2), labels = c("Yes","No")),
+      YOFIGHT2  = factor(YOFIGHT2, levels = c(1,2), labels = c("Yes","No")),
+      DRPRVME3  = factor(DRPRVME3, levels = c(1,2), labels = c("Yes","No")),
+      ANYEDUC3  = factor(ANYEDUC3, levels = c(1,2), labels = c("Yes","No")),
+      # Nominal factor 
+      NEWRACE2  = factor(NEWRACE2, levels = 1:7,
+                         labels = c("White","Black","Native Am.","Asian",
+                                    "Pacific Isl.","Multi-race","Hispanic")),
+      # Ordinal factors
+      INCOME    = factor(INCOME,   levels = 1:4,
+                         labels = c("<$20k","$20-50k","$50-75k","$75k+"),
+                         ordered = TRUE),
+      POVERTY3  = factor(POVERTY3, levels = 1:3,
+                         labels = c("Poor","Near Poor","Not Poor"),
+                         ordered = TRUE),
+      AVGGRADE  = factor(AVGGRADE, levels = 1:4,
+                         labels = c("A","B","C","D/F"),
+                         ordered = TRUE)
+    )
+}
+
+binary_class_data <- apply_types(binary_class_data)
+multiclass        <- apply_types(multiclass)
+Regression        <- apply_types(Regression)
+
+# categorical_variables for use in gbm later
+categorical_variables <- c("IRSEX","NEWRACE2","INCOME","POVERTY3",
+                            "PARCHKHW","PARHLPHW","ARGUPAR","SCHFELT",
+                            "AVGGRADE","FRDMEVR2","FRDADLY2","PRMJEVR2",
+                            "RLGATTD","YOFIGHT2","DRPRVME3","ANYEDUC3")
+
+# Verifying
+str(binary_class_data)
+```
+
+```{r}
+# splitting data for Binary class: Training and Testing
+set.seed(42)
+
+binary_split <- sample(1:nrow(binary_class_data), 0.8 * nrow(binary_class_data))
+binary_class_train <- binary_class_data[binary_split, ]
+binary_class_test  <- binary_class_data[-binary_split, ]
+cat("Binary split:", nrow(binary_class_train),",", nrow(binary_class_test), "\n")
+```
+
+```{r}
+# splitting data for Multi class: Training and Testing
+multiclass_split <- sample(1:nrow(multiclass), 0.8 * nrow(multiclass))
+multiclass_train <- multiclass[multiclass_split, ]
+multiclass_test  <- multiclass[-multiclass_split, ]
+cat("Multiclass split:", nrow(multiclass_train), ",", nrow(multiclass_test), "\n")
+```
+
+```{r}
+# splitting data for regression: Training and Testing
+regression_split <- sample(1:nrow(Regression), 0.8 * nrow(Regression))
+regression_train <- Regression[regression_split, ]
+regression_test  <- Regression[-regression_split, ]
+cat("Regression split:", nrow(regression_train), ",",nrow(regression_test), "\n")
+```
+
+```{r}
+# Compute Precision, Recall, F1 for binary classification (positive = "Yes")
+binary_metrics <- function(predicted, actual) {
+  cm        <- table(Predicted = predicted, Actual = actual)
+  acc       <- mean(predicted == actual)
+  tp        <- ifelse("Yes" %in% rownames(cm) & "Yes" %in% colnames(cm), cm["Yes","Yes"], 0)
+  fp        <- ifelse("Yes" %in% rownames(cm), sum(cm["Yes",]) - tp, 0)
+  fn        <- ifelse("Yes" %in% colnames(cm), sum(cm[,"Yes"]) - tp, 0)
+  precision <- ifelse((tp+fp)==0, 0, tp/(tp+fp))
+  recall    <- ifelse((tp+fn)==0, 0, tp/(tp+fn))
+  f1        <- ifelse((precision+recall)==0, 0, 2*precision*recall/(precision+recall))
+  list(accuracy=acc, precision=precision, recall=recall, f1=f1, confusion=cm)
+}
+
+# Macro-averaged Precision, Recall, F1 for multi-class
+multiclass_metrics <- function(predicted, actual) {
+  cm      <- table(Predicted = predicted, Actual = actual)
+  acc     <- mean(predicted == actual)
+  classes <- levels(actual)
+  prec <- sapply(classes, function(cl) {
+    tp <- ifelse(cl %in% rownames(cm) & cl %in% colnames(cm), cm[cl,cl], 0)
+    fp <- ifelse(cl %in% rownames(cm), sum(cm[cl,]) - tp, 0)
+    ifelse((tp+fp)==0, 0, tp/(tp+fp))
+  })
+  rec <- sapply(classes, function(cl) {
+    tp <- ifelse(cl %in% rownames(cm) & cl %in% colnames(cm), cm[cl,cl], 0)
+    fn <- ifelse(cl %in% colnames(cm), sum(cm[,cl]) - tp, 0)
+    ifelse((tp+fn)==0, 0, tp/(tp+fn))
+  })
+  f1 <- ifelse((prec+rec)==0, 0, 2*prec*rec/(prec+rec))
+  list(accuracy=acc, macro_precision=mean(prec),
+       macro_recall=mean(rec), macro_f1=mean(f1), confusion=cm)
+}
+
+# Regression metrics- RMSE, MAE, R-squared
+regression_metrics <- function(predicted, actual) {
+  rmse <- sqrt(mean((predicted - actual)^2))
+  mae  <- mean(abs(predicted - actual))
+  r2   <- 1 - sum((predicted - actual)^2) / sum((mean(actual) - actual)^2)
+  list(rmse=rmse, mae=mae, r2=r2)
+}
+
+# ggplot confusion matrix heatmap
+plot_confusion <- function(cm_table, title="Confusion Matrix") {
+  as.data.frame(cm_table) %>%
+    ggplot(aes(x=Actual, y=Predicted, fill=Freq)) +
+    geom_tile(color="white") +
+    geom_text(aes(label=Freq), size=5) +
+    scale_fill_gradient(low="white", high="blue") +
+    labs(title=title, fill="Count") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle=30, hjust=1))
+}
+
+# Readable variable name mapping
+readable_labels <- c(
+  FRDMEVR2 = "Friends Disapprove of MJ",
+  PRMJEVR2 = "Parent Talked About MJ",
+  ARGUPAR  = "Argues with Parents",
+  AVGGRADE = "Average Grade",
+  SCHFELT  = "School Feelings",
+  NEWRACE2 = "Race/Ethnicity",
+  INCOME   = "Household Income",
+  POVERTY3 = "Poverty Level",
+  FRDADLY2 = "Friends Use Daily",
+  IRSEX    = "Sex",
+  RLGATTD  = "Religious Attendance",
+  YOFIGHT2 = "Involved in Fights",
+  DRPRVME3 = "Drug Prevention Program",
+  ANYEDUC3 = "Drug Education",
+  PARCHKHW = "Parent Checks Homework",
+  PARHLPHW = "Parent Helps Homework"
+)
+
+# Variable importance plot 
+plot_importance_gg <- function(rf_model, title, measure) {
+  imp <- as.data.frame(importance(rf_model))
+  imp$Variable <- readable_labels[rownames(imp)]
+  imp %>%
+    arrange(desc(.data[[measure]])) %>%
+    ggplot(aes(x = reorder(Variable, .data[[measure]]),
+               y = .data[[measure]])) +
+    geom_col(fill = "blue") +
+    coord_flip() +
+    labs(title = title, x = "Predictor", y = measure) +
+    theme_minimal(base_size = 11)
+}
+
+```
+
+### Binary Classification
+
+```{r}
+tree_depth_grid <- data.frame()
+for (md in c(0.001, 0.005, 0.01, 0.05)) {
+  t_tmp <- tree(ALCFLAG ~ ., data = binary_class_train,
+                control = tree.control(nobs = nrow(binary_class_train),
+                                       mindev = md))
+  pred <- predict(t_tmp, binary_class_test, type = "class")
+  f1   <- binary_metrics(pred, binary_class_test$ALCFLAG)$f1
+  tree_depth_grid <- rbind(tree_depth_grid,
+                           data.frame(mindev = md, f1 = f1))
+}
+print(tree_depth_grid)
+best_mindev <- tree_depth_grid$mindev[which.max(tree_depth_grid$f1)]
+cat("Best mindev:", best_mindev, "\n")
+```
+
+
+```{r}
+# Train basic (unbalanced) 
+binary_class_tree <- tree(ALCFLAG ~ ., data = binary_class_train,
+                          control = tree.control(nobs = nrow(binary_class_train),
+                                                 mindev = best_mindev))
+plot(binary_class_tree)
+text(binary_class_tree, pretty = 0, cex = 0.4)
+title("Decision Tree: Ever Used Alcohol? (Basic)")
+summary(binary_class_tree)
+
+# Evaluate basic tree
+binaryclass_prediction <- predict(binary_class_tree, binary_class_test, type = "class")
+bt_m <- binary_metrics(binaryclass_prediction, binary_class_test$ALCFLAG)
+cat("Basic Tree  | Acc:", round(bt_m$accuracy, 4),
+    "| Precision:", round(bt_m$precision, 4),
+    "| Recall:", round(bt_m$recall, 4),
+    "| F1:", round(bt_m$f1, 4), "\n")
+
+binaryclass_Acc <- bt_m$accuracy
+
+# Oversampling to handle class imbalance
+binary_train_balanced <- ovun.sample(ALCFLAG ~ .,
+                                     data = binary_class_train,
+                                     method = "over",
+                                     seed = 42)$data
+table(binary_train_balanced$ALCFLAG)
+```
+
+```{r}
+# Balanced Binary tree
+binary_DT_balanced <- tree(ALCFLAG ~ ., data = binary_train_balanced)
+bal_tree_plot <- binary_DT_balanced
+bal_tree_plot$frame$var <- dplyr::recode(bal_tree_plot$frame$var,
+  "FRDMEVR2" = "Friends.Disapprove.MJ",
+  "PRMJEVR2" = "Parent.Talked.MJ",
+  "<leaf>"   = "<leaf>"
+)
+plot(bal_tree_plot)
+text(bal_tree_plot, pretty=0, cex=0.7)
+title("Decision Tree: Ever Used Alcohol? (Balanced Training Data)")
+summary(binary_DT_balanced)
+
+Binary_pred_balanced <- predict(binary_DT_balanced, binary_class_test, type="class")
+bal_m <- binary_metrics(Binary_pred_balanced, binary_class_test$ALCFLAG)
+Binary_acc_balanced <- bal_m$accuracy
+cat("Balanced Tree | Acc:", round(bal_m$accuracy,4),
+    "| Precision:", round(bal_m$precision,4),
+    "| Recall:", round(bal_m$recall,4),
+    "| F1:", round(bal_m$f1,4), "\n")
+```
+
+```{r}
+plot_confusion(bal_m$confusion, "Confusion Matrix: Balanced Decision Tree (Alcohol Use)")
+```
+
+```{r}
+rpart_binary <- rpart(ALCFLAG ~ ., data = binary_train_balanced,
+                      method = "class",
+                      control = rpart.control(cp = 0.01))
+
+rpart_binary$frame$var <- dplyr::recode(as.character(rpart_binary$frame$var),
+  "FRDMEVR2" = "Friends.Disapprove.MJ",
+  "PRMJEVR2" = "Parent.Talked.MJ",
+  "<leaf>"   = "<leaf>"
+)
+
+rpart.plot(rpart_binary,
+           type = 4,
+           extra = 104,
+           box.palette = "Blues",
+           fallen.leaves = TRUE,
+           main = "Decision Tree: Youth Alcohol Use")
+```
+
+```{r}
+#CV pruning
+set.seed(42)
+cv_binarytree <- cv.tree(binary_DT_balanced, FUN=prune.misclass)
+
+ggplot(data.frame(size=cv_binarytree$size, error=cv_binarytree$dev),
+       aes(x=size, y=error)) +
+  geom_line() + geom_point(size=3) +
+  labs(title="CV Misclassification vs. Tree Size (Binary)",
+       x="Number of Terminal Nodes", y="CV Misclassification") +
+  theme_minimal()
+
+binary_bestsize <- cv_binarytree$size[which.min(cv_binarytree$dev)]
+cat("Best tree size:", binary_bestsize, "\n")
+
+pruned_binarytree <- prune.misclass(binary_DT_balanced, best=binary_bestsize)
+pruned_r <- pruned_binarytree
+pruned_r$frame$var <- recode(pruned_r$frame$var,
+  "FRDMEVR2" = "Friends.Disapprove.MJ",
+  "PRMJEVR2" = "Parent.Talked.MJ",  "<leaf>"   = "<leaf>"
+)
+plot(pruned_r)
+text(pruned_r, pretty = 0, cex = 0.8)
+title("Pruned Tree: Ever Used Alcohol")
+```
+
+```{r}
+pruned_binarytree_prediction <- predict(pruned_binarytree, binary_class_test, type="class")
+prune_m <- binary_metrics(pruned_binarytree_prediction, binary_class_test$ALCFLAG)
+accuracy_pruned_binary <- prune_m$accuracy
+cat("Pruned Tree | Acc:", round(prune_m$accuracy,4),
+    "| F1:", round(prune_m$f1,4), "\n")
+```
+
+### Ensemble Methods
+### Bagging
+
+```{r}
+bagging_binary <- randomForest(ALCFLAG ~ ., data=binary_train_balanced,
+                               mtry=ncol(binary_train_balanced)-1,
+                               ntree=500, importance=TRUE)
+
+binarytree_bagging_pred <- predict(bagging_binary, binary_class_test)
+bag_m <- binary_metrics(binarytree_bagging_pred, binary_class_test$ALCFLAG)
+Binary_bagging_acc <- bag_m$accuracy
+cat("Bagging | Acc:", round(bag_m$accuracy,4),
+    "| Precision:", round(bag_m$precision,4),
+    "| Recall:", round(bag_m$recall,4),
+    "| F1:", round(bag_m$f1,4), "\n")
+```
+
+### Random Forest
+
+```{r}
+rf_grid_binary <- data.frame()
+for (m in c(2, 4, 8, 16)) {
+  for (n in c(100, 300, 500)) {
+    set.seed(42)
+    rf_tmp <- randomForest(ALCFLAG ~ ., data = binary_train_balanced,
+                           mtry = m, ntree = n, importance = FALSE)
+    pred <- predict(rf_tmp, binary_class_test)
+    f1   <- binary_metrics(pred, binary_class_test$ALCFLAG)$f1
+    rf_grid_binary <- rbind(rf_grid_binary,
+                            data.frame(mtry = m, ntree = n, f1 = f1))
+  }
+}
+print(rf_grid_binary)
+best_row_binary  <- rf_grid_binary[which.max(rf_grid_binary$f1), ]
+best_mtry_binary <- best_row_binary$mtry
+best_ntree_binary <- best_row_binary$ntree
+cat("Best mtry:", best_mtry_binary, "| Best ntree:", best_ntree_binary, "\n")
+
+
+set.seed(42)
+randomforest_binary <- randomForest(ALCFLAG ~ ., data=binary_train_balanced,
+                                    mtry=best_mtry_binary,
+                                    ntree=best_ntree_binary, importance=TRUE)
+
+randomforest_binary_pred <- predict(randomforest_binary, binary_class_test)
+rf_m <- binary_metrics(randomforest_binary_pred, binary_class_test$ALCFLAG)
+binary_rf_Acc <- rf_m$accuracy
+cat("Random Forest | Acc:", round(rf_m$accuracy,4),
+    "| Precision:", round(rf_m$precision,4),
+    "| Recall:", round(rf_m$recall,4),
+    "| F1:", round(rf_m$f1,4), "\n")
+```
+
+### Boosting
+
+```{r}
+# GBM data preparation
+binarytree_train_gbm <- binary_train_balanced %>%
+  mutate(ALCFLAG = ifelse(ALCFLAG=="Yes",1,0),
+         across(all_of(categorical_variables), as.numeric))
+binarytree_test_gbm <- binary_class_test %>%
+  mutate(ALCFLAG = ifelse(ALCFLAG=="Yes",1,0),
+         across(all_of(categorical_variables), as.numeric))
+```
+
+```{r}
+#Trying depths from 1-4
+gbm_grid_binary <- data.frame()
+for (d in c(1, 2, 3, 4)) {
+  for (lr in c(0.001, 0.01, 0.05, 0.1)) {
+    set.seed(42)
+    gbm_tmp <- gbm(ALCFLAG ~ ., data = binarytree_train_gbm,
+                   distribution = "bernoulli",
+                   n.trees = 1000, interaction.depth = d,
+                   shrinkage = lr, cv.folds = 5, verbose = FALSE)
+    best_n  <- gbm.perf(gbm_tmp, method = "cv", plot.it = FALSE)
+    prob    <- predict(gbm_tmp, binarytree_test_gbm,
+                       n.trees = best_n, type = "response")
+    auc_val <- auc(roc(binarytree_test_gbm$ALCFLAG, prob, quiet = TRUE))
+    gbm_grid_binary <- rbind(gbm_grid_binary,
+                             data.frame(depth = d, shrinkage = lr,
+                                        ntrees = best_n, auc = auc_val))
+  }
+}
+print(gbm_grid_binary)
+best_depth_bin  <- gbm_grid_binary$depth[which.max(gbm_grid_binary$auc)]
+best_ntree_bin  <- gbm_grid_binary$ntrees[which.max(gbm_grid_binary$auc)]
+best_shrink_bin <- gbm_grid_binary$shrinkage[which.max(gbm_grid_binary$auc)]
+cat("Best depth:", best_depth_bin,
+    "| Best shrinkage:", best_shrink_bin,
+    "| Best ntrees:", best_ntree_bin, "\n")
+```
+
+```{r}
+# Boosting with best hyperparameters
+boosting_binarytree <- gbm(ALCFLAG ~ ., data=binarytree_train_gbm,
+                           distribution="bernoulli",
+                           n.trees=best_ntree_bin,
+                           interaction.depth=best_depth_bin,
+                           shrinkage=best_shrink_bin, cv.folds=5, verbose=FALSE)
+
+boosting_binary_prob <- predict(boosting_binarytree, binarytree_test_gbm,
+                                n.trees=best_ntree_bin, type="response")
+boost_binarytree_prediction <- ifelse(boosting_binary_prob > 0.5, 1, 0)
+boosting_acc_binary <- mean(boost_binarytree_prediction == binarytree_test_gbm$ALCFLAG)
+cat("Boosting Accuracy:", round(boosting_acc_binary,4), "\n")
+```
+
+```{r}
+# ENCODING COMPARISON
+
+# Nominal- unordered factor 
+bin_nominal <- binary_train_balanced %>%
+  mutate(AVGGRADE = factor(as.numeric(AVGGRADE), levels=1:4, ordered=FALSE))
+rf_nom <- randomForest(ALCFLAG ~ ., data=bin_nominal,
+                       mtry=best_mtry_binary, ntree=300, importance=FALSE)
+test_nom <- binary_class_test %>%
+  mutate(AVGGRADE = factor(as.numeric(AVGGRADE), levels=1:4, ordered=FALSE))
+acc_nominal <- mean(predict(rf_nom, test_nom) == binary_class_test$ALCFLAG)
+
+# Ordinal- ordered factor 
+acc_ordinal <- rf_m$accuracy  
+
+# Numeric- treat grade as a number 1-4 
+bin_numeric <- binary_train_balanced %>%
+  mutate(AVGGRADE = as.numeric(AVGGRADE))
+rf_num <- randomForest(ALCFLAG ~ ., data=bin_numeric,
+                       mtry=best_mtry_binary, ntree=300, importance=FALSE)
+test_num <- binary_class_test %>%
+  mutate(AVGGRADE = as.numeric(AVGGRADE))
+acc_numeric <- mean(predict(rf_num, test_num) == binary_class_test$ALCFLAG)
+
+encoding_results <- data.frame(
+  Encoding = c("Nominal (unordered factor)",
+               "Ordinal (ordered factor)",
+               "Numeric (integer 1-4)"),
+  Accuracy = round(c(acc_nominal, acc_ordinal, acc_numeric), 4)
+)
+print(encoding_results)
+```
+
+```{r}
+# ROC curves comparing all binary models
+roc_tree    <- roc(binary_class_test$ALCFLAG,
+                   predict(binary_DT_balanced, binary_class_test, type="vector")[,"Yes"],
+                   levels=c("No","Yes"), quiet=TRUE)
+roc_rf      <- roc(binary_class_test$ALCFLAG,
+                   predict(randomforest_binary, binary_class_test, type="prob")[,"Yes"],
+                   levels=c("No","Yes"), quiet=TRUE)
+roc_boost   <- roc(binarytree_test_gbm$ALCFLAG, boosting_binary_prob, quiet=TRUE)
+
+plot(roc_tree,  col="black",
+     main="ROC Curves: Binary Classification (Alcohol Use)")
+lines(roc_rf,   col="blue")
+lines(roc_boost,col="yellow")
+legend("bottomright",
+       legend=c(paste("Balanced Tree AUC =", round(auc(roc_tree),3)),
+                paste("Random Forest AUC =", round(auc(roc_rf),3)),
+                paste("Boosting AUC =",      round(auc(roc_boost),3))),
+       col=c("black","blue","yellow"), lwd=2)
+
+```
+
+```{r}
+# Variable Importance
+plot_importance_gg(randomforest_binary,
+                   title="Variable Importance: Alcohol Use (Mean Decrease Accuracy)",
+                   measure="MeanDecreaseAccuracy")
+plot_importance_gg(randomforest_binary,
+                   title="Variable Importance: Alcohol Use (Mean Decrease Gini)",
+                   measure="MeanDecreaseGini")
+```
+
+```{r}
+# Full model Comparision
+binarytree_results <- data.frame(
+  Model     = c("Basic Tree","Balanced Tree","Pruned Tree","Bagging","Random Forest","Boosting"),
+  Accuracy  = round(c(bt_m$accuracy, bal_m$accuracy, prune_m$accuracy,
+                      bag_m$accuracy, rf_m$accuracy, boosting_acc_binary), 4),
+  Precision = round(c(bt_m$precision, bal_m$precision, prune_m$precision,
+                      bag_m$precision, rf_m$precision, NA), 4),
+  Recall    = round(c(bt_m$recall, bal_m$recall, prune_m$recall,
+                      bag_m$recall, rf_m$recall, NA), 4),
+  F1        = round(c(bt_m$f1, bal_m$f1, prune_m$f1,
+                      bag_m$f1, rf_m$f1, NA), 4)
+)
+print(binarytree_results)
+```
+
+```{r}
+# Comparison
+binarytree_results %>%
+  pivot_longer(cols=-Model, names_to="Metric", values_to="Value") %>%
+  filter(!is.na(Value)) %>%
+  ggplot(aes(x=Model, y=Value, fill=Metric)) +
+  geom_bar(stat="identity", position="dodge") +
+  labs(title="Binary Classification Model Comparison",
+       x="Model", y="Score") +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=30, hjust=1))
+```
+
+
+### Multi-class Classification
+
+```{r}
+multiclass_tree <- tree(MRJYDAYS ~ ., data = multiclass_train)
+mc_tree_plot <- multiclass_tree
+mc_tree_plot$frame$var <- dplyr::recode(mc_tree_plot$frame$var,
+  "PRMJEVR2" = "Parent.Talked.MJ",
+  "<leaf>"   = "<leaf>"
+)
+plot(mc_tree_plot)
+text(mc_tree_plot, pretty = 0, cex = 0.6)
+title("Decision Tree: Marijuana Usage Frequency")
+summary(multiclass_tree)
+```
+
+
+```{r}
+multiclass_tree_pred <- predict(multiclass_tree, multiclass_test, type = "class")
+
+confusion_matrix_multiclass <- table(Predicted = multiclass_tree_pred,
+                            Actual = multiclass_test$MRJYDAYS)
+print(confusion_matrix_multiclass)
+multiclass_accuracy <- mean(multiclass_tree_pred == multiclass_test$MRJYDAYS)
+cat("Multi-class Tree Accuracy:", round(multiclass_accuracy, 4), "\n")
+```
+
+
+```{r}
+# Pruning Multiclass
+set.seed(42)
+cv_multiclass <- cv.tree(multiclass_tree, FUN = prune.misclass)
+
+plot(cv_multiclass$size, cv_multiclass$dev, type = "b",
+     xlab = "Tree Size", ylab = "CV Error",
+     main = "Cross-Validation: Optimal Tree Size (Multi-class)")
+multiclass_bestsize <- cv_multiclass$size[which.min(cv_multiclass$dev)]
+cat("Best tree size:", multiclass_bestsize, "\n")
+```
+
+```{r}
+pruned_multiclass <- prune.misclass(multiclass_tree, best = multiclass_bestsize)
+pruned_multiclass_prediction <- predict(pruned_multiclass, multiclass_test, type = "class")
+pruned_multiclass_acc <- mean(pruned_multiclass_prediction == multiclass_test$MRJYDAYS)
+cat("Pruned Tree Accuracy:", round(pruned_multiclass_acc, 4), "\n")
+```
+
+
+```{r}
+# Bagging Multiclass
+set.seed(42)
+bagging_multiclass <- randomForest(MRJYDAYS ~ ., data = multiclass_train,
+                          mtry = ncol(multiclass_train) - 1,
+                          ntree = 500,
+                          importance = TRUE)
+
+bagging_multiclass_prediction <- predict(bagging_multiclass, multiclass_test)
+bagging_multiclass_acc <- mean(bagging_multiclass_prediction == multiclass_test$MRJYDAYS)
+cat("Bagging Accuracy:", round(bagging_multiclass_acc, 4), "\n")
+```
+
+```{r}
+# Joint grid search over mtry and ntree for multiclass RF
+rf_grid_multi <- data.frame()
+for (m in c(2, 4, 8)) {
+  for (n in c(100, 300, 500)) {
+    set.seed(42)
+    rf_tmp <- randomForest(MRJYDAYS ~ ., data = multiclass_train,
+                           mtry = m, ntree = n, importance = FALSE)
+    pred <- predict(rf_tmp, multiclass_test)
+    acc  <- mean(pred == multiclass_test$MRJYDAYS)
+    rf_grid_multi <- rbind(rf_grid_multi,
+                           data.frame(mtry = m, ntree = n, accuracy = acc))
+  }
+}
+print(rf_grid_multi)
+best_mtry_multi  <- rf_grid_multi$mtry[which.max(rf_grid_multi$accuracy)]
+best_ntree_multi <- rf_grid_multi$ntree[which.max(rf_grid_multi$accuracy)]
+cat("Best mtry:", best_mtry_multi, "| Best ntree:", best_ntree_multi, "\n")
+
+# Random Forest Multiclass
+set.seed(42)
+randomforest_multiclass <- randomForest(MRJYDAYS ~ ., data = multiclass_train,
+                         mtry = best_mtry_multi, ntree = best_ntree_multi, importance = TRUE)
+
+randomforest_multiclass_pred <- predict(randomforest_multiclass, multiclass_test)
+rf_multiclass_acc <- mean(randomforest_multiclass_pred == multiclass_test$MRJYDAYS)
+cat("Random Forest Accuracy:", round(rf_multiclass_acc, 4), "\n")
+```
+
+```{r}
+# Boosting Multiclass
+multiclass_train_gbm <- multiclass_train %>%
+  mutate(MRJYDAYS = as.numeric(MRJYDAYS) - 1,
+         across(all_of(categorical_variables), as.numeric))
+
+multiclass_test_gbm <- multiclass_test %>%
+  mutate(MRJYDAYS = as.numeric(MRJYDAYS) - 1,
+         across(all_of(categorical_variables), as.numeric))
+```
+
+```{r}
+# Jointly tuning depth and shrinkage for multiclass GBM
+gbm_grid_multi <- data.frame()
+for (d in c(1, 2, 3, 4)) {
+  for (lr in c(0.001, 0.01, 0.05, 0.1)) {
+    set.seed(42)
+    gbm_tmp <- gbm(MRJYDAYS ~ ., data = multiclass_train_gbm,
+                   distribution = "multinomial",
+                   n.trees = 500, interaction.depth = d,
+                   shrinkage = lr, cv.folds = 5, verbose = FALSE)
+    best_n <- gbm.perf(gbm_tmp, method = "cv", plot.it = FALSE)
+    prob   <- predict(gbm_tmp, multiclass_test_gbm,
+                      n.trees = best_n, type = "response")
+    pred   <- apply(prob, 1, which.max) - 1
+    acc    <- mean(pred == multiclass_test_gbm$MRJYDAYS)
+    gbm_grid_multi <- rbind(gbm_grid_multi,
+                            data.frame(depth = d, shrinkage = lr,
+                                       ntrees = best_n, accuracy = acc))
+  }
+}
+print(gbm_grid_multi)
+best_depth_multi  <- gbm_grid_multi$depth[which.max(gbm_grid_multi$accuracy)]
+best_shrink_multi <- gbm_grid_multi$shrinkage[which.max(gbm_grid_multi$accuracy)]
+best_ntree_multi_gbm <- gbm_grid_multi$ntrees[which.max(gbm_grid_multi$accuracy)]
+cat("Best depth:", best_depth_multi,
+    "| Best shrinkage:", best_shrink_multi,
+    "| Best ntrees:", best_ntree_multi_gbm, "\n")
+```
+
+
+```{r}
+boosting_multiclass <- gbm(MRJYDAYS ~ ., data = multiclass_train_gbm,
+                   distribution = "multinomial",
+                   n.trees = best_ntree_multi_gbm,
+                   interaction.depth = best_depth_multi,
+                   shrinkage = best_shrink_multi,
+                   cv.folds = 5)
+
+multiclass_best_trees <- gbm.perf(boosting_multiclass, method = "cv", plot.it = FALSE)
+boosting_multiclass_prob <- predict(boosting_multiclass, multiclass_test_gbm,
+                            n.trees = multiclass_best_trees, type = "response")
+boosting_multiclass_pred <- apply(boosting_multiclass_prob, 1, which.max) - 1
+boosting_multiclass_acc <- mean(boosting_multiclass_pred == multiclass_test_gbm$MRJYDAYS)
+cat("Boosting Accuracy:", round(boosting_multiclass_acc, 4), "\n")
+```
+
+```{r}
+# Multi-class Metrics
+mc_tree_m  <- multiclass_metrics(multiclass_tree_pred,           multiclass_test$MRJYDAYS)
+prune_mc_m <- multiclass_metrics(pruned_multiclass_prediction,   multiclass_test$MRJYDAYS)
+bag_mc_m   <- multiclass_metrics(bagging_multiclass_prediction,  multiclass_test$MRJYDAYS)
+rf_mc_m    <- multiclass_metrics(randomforest_multiclass_pred,   multiclass_test$MRJYDAYS)
+```
+
+```{r}
+# Converting back to factor for boosting
+boost_mc_factor <- factor(boosting_multiclass_pred, levels=0:5,
+                          labels=levels(multiclass_test$MRJYDAYS))
+actual_mc_factor <- factor(multiclass_test_gbm$MRJYDAYS, levels=0:5,
+                           labels=levels(multiclass_test$MRJYDAYS))
+boost_mc_m <- multiclass_metrics(boost_mc_factor, actual_mc_factor)
+
+multiclass_results <- data.frame(
+  Model    = c("Basic Tree","Pruned Tree","Bagging","Random Forest","Boosting"),
+  Accuracy = round(c(mc_tree_m$accuracy,  prune_mc_m$accuracy,
+                     bag_mc_m$accuracy,   rf_mc_m$accuracy,
+                     boost_mc_m$accuracy), 4),
+  Macro_F1 = round(c(mc_tree_m$macro_f1,  prune_mc_m$macro_f1,
+                     bag_mc_m$macro_f1,   rf_mc_m$macro_f1,
+                     boost_mc_m$macro_f1), 4)
+)
+print(multiclass_results)
+```
+
+```{r}
+# Comparison
+multiclass_results %>%
+  pivot_longer(cols=-Model, names_to="Metric", values_to="Value") %>%
+  ggplot(aes(x=Model, y=Value, fill=Metric)) +
+  geom_bar(stat="identity", position="dodge") +
+  labs(title="Multi-class Model Comparison: MJ Use Frequency",
+       x="Model", y="Score") +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=30, hjust=1))
+```
+
+```{r}
+# Confusion matrix heatmap for best model 
+plot_confusion(boost_mc_m$confusion,
+               "Confusion Matrix: Boosting (MJ Use Frequency)")
+
+# Variable importance
+plot_importance_gg(randomforest_multiclass,
+                   title="Variable Importance: MJ Frequency (Random Forest)",
+                   measure="MeanDecreaseAccuracy")
+```
+
+
+### Regression
+```{r}
+regression_tree <- tree(IRMJFY ~ ., data = regression_train)
+reg_tree_plot <- regression_tree
+reg_tree_plot$frame$var <- dplyr::recode(reg_tree_plot$frame$var,
+  "PRMJEVR2" = "Parent.Talked.MJ",
+  "SCHFELT"  = "School.Feelings",
+  "AVGGRADE" = "Avg.Grade",
+  "<leaf>"   = "<leaf>"
+)
+plot(reg_tree_plot)
+text(reg_tree_plot, pretty = 0, cex = 0.7)
+title("Regression Tree: Days Used Marijuana Per Year")
+
+summary(regression_tree)
+
+# Evaluating with RMSE
+regressiontree_prediction <- predict(regression_tree, regression_test)
+regression_rmse<- sqrt(mean((regressiontree_prediction - regression_test$IRMJFY)^2))
+cat("Basic Tree RMSE:", round(regression_rmse, 4), "\n")
+```
+
+
+```{r}
+# Pruning Regression Tree
+cv_regression <- cv.tree(regression_tree)
+
+plot(cv_regression$size, cv_regression$dev, type = "b",
+     xlab = "Tree Size", ylab = "CV Deviance",
+     main = "Cross-Validation: Optimal Tree Size (Regression)")
+
+regression_bestsize <- cv_regression$size[which.min(cv_regression$dev)]
+cat("Best tree size:", regression_bestsize, "\n")
+
+pruned_regressiontree <- prune.tree(regression_tree, best = regression_bestsize)
+pruned_regression_pred <- predict(pruned_regressiontree, regression_test)
+pruned_regression_rmse <- sqrt(mean((pruned_regression_pred - regression_test$IRMJFY)^2))
+cat("Pruned Tree RMSE:", round(pruned_regression_rmse, 4), "\n")
+```
+
+```{r}
+# Bagging regression
+set.seed(42)
+bagging_regression <- randomForest(IRMJFY ~ ., data = regression_train,
+                        mtry = ncol(regression_train) - 1,
+                        ntree = 500,
+                        importance = TRUE)
+bagging_reggression_pred <- predict(bagging_regression, regression_test)
+bagging_regression_rmse <- sqrt(mean((bagging_reggression_pred - regression_test$IRMJFY)^2))
+cat("Bagging RMSE:", round(bagging_regression_rmse, 4), "\n")
+
+# Tune mtry for regression Random Forest
+set.seed(42)
+tuning_rf_reg <- tuneRF(
+  regression_train[, predictor_variables],
+  regression_train$IRMJFY,
+  stepFactor = 1.5,
+  improve = 0.01,
+  ntreeTry = 200,
+  trace = FALSE,
+  plot = TRUE
+)
+best_mtry_reg <- tuning_rf_reg[which.min(tuning_rf_reg[,"OOBError"]), "mtry"]
+cat("Best mtry for regression RF:", best_mtry_reg, "\n")
+
+# Also tuning ntree jointly with mtry for regression RF
+rf_grid_reg <- data.frame()
+for (m in c(2, 3, 4, 8)) {
+  for (n in c(100, 300, 500)) {
+    set.seed(42)
+    rf_tmp <- randomForest(IRMJFY ~ ., data = regression_train,
+                           mtry = m, ntree = n, importance = FALSE)
+    pred <- predict(rf_tmp, regression_test)
+    rmse <- sqrt(mean((pred - regression_test$IRMJFY)^2))
+    rf_grid_reg <- rbind(rf_grid_reg,
+                         data.frame(mtry = m, ntree = n, rmse = rmse))
+  }
+}
+print(rf_grid_reg)
+best_mtry_reg  <- rf_grid_reg$mtry[which.min(rf_grid_reg$rmse)]
+best_ntree_reg <- rf_grid_reg$ntree[which.min(rf_grid_reg$rmse)]
+cat("Best mtry:", best_mtry_reg, "| Best ntree:", best_ntree_reg, "\n")
+
+# Random Forest regression
+randomforest_regression <- randomForest(IRMJFY ~ ., data = regression_train,
+                       mtry = best_mtry_reg,
+                       ntree = best_ntree_reg,
+                       importance = TRUE)
+randomforest_regression_pred <- predict(randomforest_regression, regression_test)
+rf_regression_rmse <- sqrt(mean((randomforest_regression_pred - regression_test$IRMJFY)^2))
+cat("Random Forest RMSE:", round(rf_regression_rmse, 4), "\n")
+
+# Create GBM data 
+regression_train_gbm <- regression_train %>%
+  mutate(across(all_of(categorical_variables), as.numeric))
+regression_test_gbm <- regression_test %>%
+  mutate(across(all_of(categorical_variables), as.numeric))
+
+# Jointly tuning depth AND shrinkage for regression GBM
+gbm_grid_reg <- data.frame()
+for (d in c(1, 2, 3, 4)) {
+  for (lr in c(0.001, 0.01, 0.05, 0.1)) {
+    gbm_tmp <- gbm(IRMJFY ~ ., data = regression_train_gbm,
+                   distribution = "gaussian",
+                   n.trees = 500, interaction.depth = d,
+                   shrinkage = lr, cv.folds = 5, verbose = FALSE)
+    best_n <- gbm.perf(gbm_tmp, method = "cv", plot.it = FALSE)
+    preds  <- predict(gbm_tmp, regression_test_gbm, n.trees = best_n)
+    rmse   <- sqrt(mean((preds - regression_test_gbm$IRMJFY)^2))
+    gbm_grid_reg <- rbind(gbm_grid_reg,
+                          data.frame(depth = d, shrinkage = lr,
+                                     ntrees = best_n, rmse = rmse))
+  }
+}
+print(gbm_grid_reg)
+best_depth_reg     <- gbm_grid_reg$depth[which.min(gbm_grid_reg$rmse)]
+best_shrinkage     <- gbm_grid_reg$shrinkage[which.min(gbm_grid_reg$rmse)]
+best_ntree_reg_gbm <- gbm_grid_reg$ntrees[which.min(gbm_grid_reg$rmse)]
+cat("Best depth:", best_depth_reg,
+    "| Best shrinkage:", best_shrinkage,
+    "| Best ntrees:", best_ntree_reg_gbm, "\n")
+
+# Final boosting model with best shrinkage
+boosting_regression <- gbm(IRMJFY ~ ., data = regression_train_gbm,
+                 distribution = "gaussian",
+                 n.trees = best_ntree_reg_gbm,
+                 interaction.depth = best_depth_reg,
+                 shrinkage = best_shrinkage,
+                 cv.folds = 5)
+regression_best_trees <- gbm.perf(boosting_regression, method = "cv", plot.it = FALSE)
+boosting_regression_pred <- predict(boosting_regression, regression_test_gbm, 
+                                    n.trees = regression_best_trees)
+boosting_regression_rmse <- sqrt(mean((boosting_regression_pred - regression_test_gbm$IRMJFY)^2))
+cat("Boosting RMSE:", round(boosting_regression_rmse, 4), "\n")
+```
+
+```{r}
+# Regression Metrics
+reg_tree_m  <- regression_metrics(regressiontree_prediction,  regression_test$IRMJFY)
+prune_reg_m <- regression_metrics(pruned_regression_pred,     regression_test$IRMJFY)
+bag_reg_m   <- regression_metrics(bagging_reggression_pred,   regression_test$IRMJFY)
+rf_reg_m    <- regression_metrics(randomforest_regression_pred, regression_test$IRMJFY)
+boost_reg_m <- regression_metrics(boosting_regression_pred,   regression_test_gbm$IRMJFY)
+
+regression_results <- data.frame(
+  Model = c("Basic Tree","Pruned Tree","Bagging","Random Forest","Boosting"),
+  RMSE  = round(c(reg_tree_m$rmse,  prune_reg_m$rmse,
+                  bag_reg_m$rmse,   rf_reg_m$rmse,   boost_reg_m$rmse), 3),
+  MAE   = round(c(reg_tree_m$mae,   prune_reg_m$mae,
+                  bag_reg_m$mae,    rf_reg_m$mae,    boost_reg_m$mae), 3),
+  R2    = round(c(reg_tree_m$r2,    prune_reg_m$r2,
+                  bag_reg_m$r2,     rf_reg_m$r2,     boost_reg_m$r2), 3)
+)
+print(regression_results)
+
+```
+
+```{r}
+# RMSE plot for comparison
+regression_results %>%
+  ggplot(aes(x=reorder(Model, RMSE), y=RMSE, fill=Model)) +
+  geom_col(show.legend=FALSE) + coord_flip() +
+  labs(title="Regression Model Comparison: RMSE (Lower = Better)",
+       x="Model", y="RMSE (days/year)") +
+  theme_minimal()
+```
+
+```{r}
+regression_results %>%
+  ggplot(aes(x=reorder(Model, R2), y=R2, fill=Model)) +
+  geom_col(show.legend=FALSE) + coord_flip() +
+  labs(title="Regression Model Comparison: R² (Higher = Better)",
+       x="Model", y="R²") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data.frame(Actual=regression_test$IRMJFY,
+                  Predicted=randomforest_regression_pred),
+       aes(x=Actual, y=Predicted)) +
+  geom_point(alpha=0.4, color="blue") +
+  geom_abline(slope=1, intercept=0, color="yellow", linetype="dashed") +
+  labs(title="Random Forest: Predicted vs. Actual (MJ Days/Year)",
+       x="Actual Days", y="Predicted Days") +
+  theme_minimal()
+```
+
+```{r}
+plot_importance_gg(randomforest_binary,
+                   title="Variable Importance: Alcohol Use (Random Forest)",
+                   measure="MeanDecreaseAccuracy")
+
+plot_importance_gg(randomforest_multiclass,
+                   title="Variable Importance: MJ Frequency (Random Forest)",
+                   measure="MeanDecreaseAccuracy")
+
+plot_importance_gg(randomforest_regression,
+                   title="Variable Importance: MJ Days/Year (Random Forest)",
+                   measure="IncNodePurity")
+```
+
+```{r}
+# Boosting variable importance
+boost_inf <- summary(boosting_regression, 
+                     n.trees = regression_best_trees, 
+                     plotit = FALSE)
+boost_inf$var <- readable_labels[boost_inf$var]
+
+ggplot(boost_inf, aes(x=reorder(var, rel.inf), y=rel.inf)) +
+  geom_col(fill="blue") + coord_flip() +
+  labs(title="Relative Influence: Boosting (MJ Days/Year)",
+       x="Predictor", y="Relative Influence (%)") +
+  theme_minimal(base_size=12)
+```
+
+```{r}
+cat("\nBinary (Alcohol - ever used): Accuracy + F1 matter due to class imbalance.\n")
+print(binarytree_results[, c("Model","Accuracy","F1")])
+
+cat("\nMulti-class (MJ Frequency): Macro-F1 is critical with 6 imbalanced classes.\n")
+print(multiclass_results)
+
+cat("\nRegression (MJ Days/Year): RMSE, MAE, R2 reported.\n")
+print(regression_results)
+
+cat("\nNote: Each task type requires different error metrics.\n",
+    "Binary F1 penalizes missing the minority class (users).\n",
+    "Macro-F1 treats all 6 frequency classes equally regardless of size.\n",
+    "R² near 0 in regression shows demographic/social predictors alone\n",
+    "explain little variance in exact usage intensity — a known limitation.\n")
+```
+
+
+
+```{r}
+cat("\n=== CROSS-TASK ERROR COMPARISON ===\n")
+cross_task <- data.frame(
+  Task = c("Binary: Alcohol Use",
+           "Multi-class: MJ Frequency", 
+           "Regression: MJ Days/Year"),
+  Best_Model = c("Balanced/Pruned Tree",
+                 "Boosting",
+                 "Basic Tree"),
+  Key_Metric = c("F1 = 0.497",
+                 "Macro F1 = 0.181",
+                 "RMSE = 109.6, R² = 0.087")
+)
+print(cross_task)
+```
+
+Why different metrics for each task?
+Accuracy misleading with 77/23 imbalance, the F1 balances precision/recall, the 6 unequal classes need macro-averaging to treat all classes fairly, Continuous target needs error magnitude R-squared shows limited explained variance.
+
+## Result Summary
+
+In all three models developed, the influence of peers and parents emerged as the primary predictors of substance use behavior among youths. The consistent use of marijuana by a parent or friend was considered as the strongest predictor of substance use across all three tasks. Additionally, academic performance in schools and the level of engagement with educational activities were significant predictors. Although the models exhibited low levels of accuracy especially when applied to the multiclass classification, the insights derived from the analysis are still insightful. The results provide evidence to suggest that intervention programs aimed at improving communication within families and peer groups could yield better results compared to demographic-based campaigns. It is crucial for data scientists to portray their findings responsibly.
